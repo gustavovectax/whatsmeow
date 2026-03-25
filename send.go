@@ -941,12 +941,12 @@ func (cli *Client) getTcOrCsTokenNode(ctx context.Context, to types.JID) *waBina
 		}
 	}
 	// Fall back to cstoken if no valid tctoken
-	return cli.genCsTokenNode(ctx)
+	return cli.genCsTokenNode(ctx, to)
 }
 
-// genCsTokenNode generates a cstoken node using HMAC-SHA256(nctSalt, myLID).
-// The cstoken uses the SENDER's own LID (not the recipient's), matching WhatsApp Web behaviour.
-func (cli *Client) genCsTokenNode(ctx context.Context) *waBinary.Node {
+// genCsTokenNode generates a cstoken node using HMAC-SHA256(nctSalt, recipientAccountLid.toString()).
+// Matches genCsTokenBody in WhatsApp Web: e.accountLid.toString() where e is the recipient chat.
+func (cli *Client) genCsTokenNode(ctx context.Context, to types.JID) *waBinary.Node {
 	salt, err := cli.Store.NctSalt.GetNctSalt(ctx)
 	if err != nil {
 		cli.Log.Warnf("Failed to get NctSalt for cstoken: %v", err)
@@ -954,12 +954,17 @@ func (cli *Client) genCsTokenNode(ctx context.Context) *waBinary.Node {
 	} else if len(salt) == 0 {
 		return nil
 	}
-	myLID := cli.getOwnLID()
-	if myLID.IsEmpty() {
-		return nil
+	var recipientLID types.JID
+	if to.Server == types.HiddenUserServer {
+		recipientLID = to.ToNonAD()
+	} else {
+		recipientLID, err = cli.Store.LIDs.GetLIDForPN(ctx, to)
+		if err != nil || recipientLID.IsEmpty() {
+			return nil
+		}
 	}
 	mac := hmac.New(sha256.New, salt)
-	mac.Write([]byte(myLID.ToNonAD().String()))
+	mac.Write([]byte(recipientLID.String()))
 	csToken := mac.Sum(nil)
 	return &waBinary.Node{
 		Tag:     "cstoken",
