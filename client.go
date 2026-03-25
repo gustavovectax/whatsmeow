@@ -126,6 +126,9 @@ type Client struct {
 	appStateKeyRequests     map[string]time.Time
 	appStateKeyRequestsLock sync.RWMutex
 
+	privacyTokenSentAt     map[string]time.Time
+	privacyTokenSentLock   sync.Mutex
+
 	messageSendLock sync.Mutex
 
 	privacySettingsCache atomic.Value
@@ -263,6 +266,7 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 		sessionRecreateHistory: make(map[types.JID]time.Time),
 		GetMessageForRetry:     func(requester, to types.JID, id types.MessageID) *waE2E.Message { return nil },
 		appStateKeyRequests:    make(map[string]time.Time),
+		privacyTokenSentAt:     make(map[string]time.Time),
 
 		pendingPhoneRerequests: make(map[types.MessageID]context.CancelFunc),
 

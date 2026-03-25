@@ -868,12 +868,34 @@ func (cli *Client) sendDM(
 	}
 
 	// Issue privacy token to contact if needed (WAWebSendTcTokenChatAction flow)
-	if to.Server == types.DefaultUserServer {
-		if tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to); err != nil {
-			cli.Log.Warnf("Failed to check privacy token sender status for %s: %v", to, err)
-		} else if tcToken == nil || shouldSendPrivacyToken(tcToken.SenderTimestamp) {
-			if issueErr := cli.IssuePrivacyToken(ctx, to); issueErr != nil {
-				cli.Log.Warnf("Failed to issue privacy token to %s: %v", to, issueErr)
+	if to.Server == types.DefaultUserServer || to.Server == types.HiddenUserServer {
+		needsIssue := false
+		tokenKey := to.ToNonAD().String()
+		cli.privacyTokenSentLock.Lock()
+		if inMemTs, ok := cli.privacyTokenSentAt[tokenKey]; ok {
+			needsIssue = shouldSendPrivacyToken(inMemTs)
+		} else {
+			needsIssue = true
+		}
+		cli.privacyTokenSentLock.Unlock()
+		if needsIssue {
+			if tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to); err != nil {
+				cli.Log.Warnf("Failed to check privacy token sender status for %s: %v", to, err)
+			} else {
+				senderTs := time.Time{}
+				if tcToken != nil {
+					senderTs = tcToken.SenderTimestamp
+				}
+				if shouldSendPrivacyToken(senderTs) {
+					if issueErr := cli.IssuePrivacyToken(ctx, to); issueErr != nil {
+						cli.Log.Warnf("Failed to issue privacy token to %s: %v", to, issueErr)
+					}
+				} else {
+					// DB has a recent sender timestamp; cache it in memory
+					cli.privacyTokenSentLock.Lock()
+					cli.privacyTokenSentAt[tokenKey] = senderTs
+					cli.privacyTokenSentLock.Unlock()
+				}
 			}
 		}
 	}
@@ -891,25 +913,40 @@ func (cli *Client) sendDM(
 	return phash, data, nil
 }
 
-// tcTokenMaxAge is the maximum age of a trusted contact token before it's considered expired.
-// This matches the maximum tctoken_duration AB prop value in WhatsApp Web (15552000 = 180 days).
-const tcTokenMaxAge = 180 * 24 * time.Hour
+// TC token defaults matching WA_TC_TOKEN_DEFAULTS in WhatsApp Web:
+//   DURATION_S=604800 (7 days), NUM_BUCKETS=4 → effective 28-day window for receiver tokens
+//   SENDER_DURATION_S=604800 (7 days) → send new token each time the bucket changes
+const (
+	tcTokenDurationS       int64 = 604_800 // 7 days
+	tcTokenNumBuckets      int64 = 4
+	tcTokenSenderDurationS int64 = 604_800 // 7 days
+)
+
+// tcTokenExpired checks whether a received tc token is too old using bucket arithmetic.
+// Mirrors isTokenExpired(tokenTimestampS, nowS, durationS, numBuckets) from WhatsApp Web.
+func tcTokenExpired(tokenTimestampS, nowS int64) bool {
+	cutoffBucket := (nowS/tcTokenDurationS) - tcTokenNumBuckets
+	cutoffS := cutoffBucket * tcTokenDurationS
+	return tokenTimestampS < cutoffS
+}
 
 func (cli *Client) getTcOrCsTokenNode(ctx context.Context, to types.JID) *waBinary.Node {
 	tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to)
 	if err != nil {
 		cli.Log.Warnf("Failed to get privacy token for %s: %v", to, err)
-	} else if tcToken != nil && time.Since(tcToken.Timestamp) < tcTokenMaxAge {
+	} else if tcToken != nil && len(tcToken.Token) > 0 && !tcTokenExpired(tcToken.Timestamp.Unix(), time.Now().Unix()) {
 		return &waBinary.Node{
 			Tag:     "tctoken",
 			Content: tcToken.Token,
 		}
 	}
 	// Fall back to cstoken if no valid tctoken
-	return cli.genCsTokenNode(ctx, to)
+	return cli.genCsTokenNode(ctx)
 }
 
-func (cli *Client) genCsTokenNode(ctx context.Context, to types.JID) *waBinary.Node {
+// genCsTokenNode generates a cstoken node using HMAC-SHA256(nctSalt, myLID).
+// The cstoken uses the SENDER's own LID (not the recipient's), matching WhatsApp Web behaviour.
+func (cli *Client) genCsTokenNode(ctx context.Context) *waBinary.Node {
 	salt, err := cli.Store.NctSalt.GetNctSalt(ctx)
 	if err != nil {
 		cli.Log.Warnf("Failed to get NctSalt for cstoken: %v", err)
@@ -917,13 +954,12 @@ func (cli *Client) genCsTokenNode(ctx context.Context, to types.JID) *waBinary.N
 	} else if len(salt) == 0 {
 		return nil
 	}
-	// Look up the LID for the recipient (cstoken uses HMAC-SHA256(salt, LID))
-	recipientLID, err := cli.Store.LIDs.GetLIDForPN(ctx, to)
-	if err != nil || recipientLID.IsEmpty() {
+	myLID := cli.getOwnLID()
+	if myLID.IsEmpty() {
 		return nil
 	}
 	mac := hmac.New(sha256.New, salt)
-	mac.Write([]byte(recipientLID.String()))
+	mac.Write([]byte(myLID.ToNonAD().String()))
 	csToken := mac.Sum(nil)
 	return &waBinary.Node{
 		Tag:     "cstoken",
@@ -931,20 +967,15 @@ func (cli *Client) genCsTokenNode(ctx context.Context, to types.JID) *waBinary.N
 	}
 }
 
-// defaultTcTokenSenderDuration is the bucket duration for checking if a new sender token needs to be issued.
-// This matches the tctoken_duration_sender AB prop default in WhatsApp Web (30 days).
-const defaultTcTokenSenderDuration = 30 * 24 * time.Hour
-
 // shouldSendPrivacyToken checks if we need to issue a new trusted contact token to a user.
-// Uses the same bucket logic as WAWebTrustedContactsUtils.shouldSendNewToken in WhatsApp Web.
+// Uses the same bucket logic as shouldSendNewToken in WhatsApp Web (different bucket = send).
 func shouldSendPrivacyToken(senderTimestamp time.Time) bool {
 	if senderTimestamp.IsZero() {
 		return true
 	}
-	duration := int64(defaultTcTokenSenderDuration.Seconds())
-	nowBucket := time.Now().Unix() / duration
-	tsBucket := senderTimestamp.Unix() / duration
-	return nowBucket > tsBucket
+	nowBucket := time.Now().Unix() / tcTokenSenderDurationS
+	tsBucket := senderTimestamp.Unix() / tcTokenSenderDurationS
+	return nowBucket != tsBucket
 }
 
 // IssuePrivacyToken sends a trusted contact token IQ to the WhatsApp server for the given user.
@@ -953,8 +984,10 @@ func shouldSendPrivacyToken(senderTimestamp time.Time) bool {
 func (cli *Client) IssuePrivacyToken(ctx context.Context, to types.JID) error {
 	ts := time.Now().Unix()
 	issueJID := to.ToNonAD()
-	if lid, err := cli.Store.LIDs.GetLIDForPN(ctx, to); err == nil && !lid.IsEmpty() {
-		issueJID = lid.ToNonAD()
+	if to.Server == types.DefaultUserServer {
+		if lid, err := cli.Store.LIDs.GetLIDForPN(ctx, to); err == nil && !lid.IsEmpty() {
+			issueJID = lid.ToNonAD()
+		}
 	}
 	_, err := cli.sendIQ(ctx, infoQuery{
 		Namespace: "privacy",
@@ -975,7 +1008,17 @@ func (cli *Client) IssuePrivacyToken(ctx context.Context, to types.JID) error {
 	if err != nil {
 		return fmt.Errorf("failed to send privacy token IQ: %w", err)
 	}
-	return cli.Store.PrivacyTokens.UpdatePrivacySenderTimestamp(ctx, to, time.Unix(ts, 0))
+	sentTime := time.Unix(ts, 0)
+	// Update in-memory cache immediately so we don't re-issue on the next message
+	tokenKey := to.ToNonAD().String()
+	cli.privacyTokenSentLock.Lock()
+	cli.privacyTokenSentAt[tokenKey] = sentTime
+	cli.privacyTokenSentLock.Unlock()
+	// Best-effort DB update (only succeeds if a row already exists from a received token)
+	if dbErr := cli.Store.PrivacyTokens.UpdatePrivacySenderTimestamp(ctx, to, sentTime); dbErr != nil {
+		cli.Log.Debugf("Could not persist sender timestamp for %s (no token row yet): %v", to, dbErr)
+	}
+	return nil
 }
 
 func getTypeFromMessage(msg *waE2E.Message) string {

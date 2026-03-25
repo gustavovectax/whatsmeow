@@ -989,15 +989,8 @@ const (
 	`
 	getNctSalt = `SELECT salt FROM whatsmeow_nct_salt WHERE our_jid=$1`
 	updatePrivacySenderTimestamp = `
-		UPDATE whatsmeow_privacy_tokens SET sender_timestamp=$3 WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
-			CASE
-				WHEN $2 LIKE '%@lid'
-					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
-				WHEN $2 LIKE '%@s.whatsapp.net'
-					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE pn=replace($2, '@s.whatsapp.net', ''))
-				ELSE $2
-			END
-		))
+		UPDATE whatsmeow_privacy_tokens SET sender_timestamp=$3
+		WHERE our_jid=$1 AND their_jid=$2
 	`
 )
 

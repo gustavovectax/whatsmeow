@@ -1,4 +1,4 @@
--- v14: Add NctSalt table for cstoken computation
+-- v14 (compatible with v8+): Add NctSalt table for cstoken computation
 CREATE TABLE whatsmeow_nct_salt (
 	our_jid TEXT PRIMARY KEY,
 	salt    bytea NOT NULL,
