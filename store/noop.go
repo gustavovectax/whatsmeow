@@ -36,6 +36,7 @@ var NoopDevice = &Device{
 	ChatSettings:  nilStore,
 	MsgSecrets:    nilStore,
 	PrivacyTokens: nilStore,
+	NctSalt:       nilStore,
 	EventBuffer:   nilStore,
 	LIDs:          nilStore,
 	Container:     nilStore,
@@ -225,6 +226,18 @@ func (n *NoopStore) PutPrivacyTokens(ctx context.Context, tokens ...PrivacyToken
 }
 
 func (n *NoopStore) GetPrivacyToken(ctx context.Context, user types.JID) (*PrivacyToken, error) {
+	return nil, n.Error
+}
+
+func (n *NoopStore) UpdatePrivacySenderTimestamp(ctx context.Context, user types.JID, ts time.Time) error {
+	return n.Error
+}
+
+func (n *NoopStore) PutNctSalt(ctx context.Context, salt []byte) error {
+	return n.Error
+}
+
+func (n *NoopStore) GetNctSalt(ctx context.Context) ([]byte, error) {
 	return nil, n.Error
 }
 

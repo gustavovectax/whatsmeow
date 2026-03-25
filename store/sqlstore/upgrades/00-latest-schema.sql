@@ -172,3 +172,9 @@ CREATE TABLE whatsmeow_retry_buffer (
 );
 
 CREATE INDEX whatsmeow_retry_buffer_timestamp_idx ON whatsmeow_retry_buffer (our_jid, timestamp);
+
+CREATE TABLE whatsmeow_nct_salt (
+	our_jid TEXT PRIMARY KEY,
+	salt    bytea NOT NULL,
+	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
+);

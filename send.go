@@ -8,6 +8,7 @@ package whatsmeow
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -866,13 +867,19 @@ func (cli *Client) sendDM(
 		node.Content = append(node.GetChildren(), cli.getMessageReportingToken(messagePlaintext, message, ownID, to, id))
 	}
 
-	if tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to); err != nil {
-		cli.Log.Warnf("Failed to get privacy token for %s: %v", to, err)
-	} else if tcToken != nil {
-		node.Content = append(node.GetChildren(), waBinary.Node{
-			Tag:     "tctoken",
-			Content: tcToken.Token,
-		})
+	// Issue privacy token to contact if needed (WAWebSendTcTokenChatAction flow)
+	if to.Server == types.DefaultUserServer {
+		if tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to); err != nil {
+			cli.Log.Warnf("Failed to check privacy token sender status for %s: %v", to, err)
+		} else if tcToken == nil || shouldSendPrivacyToken(tcToken.SenderTimestamp) {
+			if issueErr := cli.IssuePrivacyToken(ctx, to); issueErr != nil {
+				cli.Log.Warnf("Failed to issue privacy token to %s: %v", to, issueErr)
+			}
+		}
+	}
+
+	if tcTokenNode := cli.getTcOrCsTokenNode(ctx, to); tcTokenNode != nil {
+		node.Content = append(node.GetChildren(), *tcTokenNode)
 	}
 
 	start = time.Now()
@@ -882,6 +889,93 @@ func (cli *Client) sendDM(
 		return "", nil, fmt.Errorf("failed to send message node: %w", err)
 	}
 	return phash, data, nil
+}
+
+// tcTokenMaxAge is the maximum age of a trusted contact token before it's considered expired.
+// This matches the maximum tctoken_duration AB prop value in WhatsApp Web (15552000 = 180 days).
+const tcTokenMaxAge = 180 * 24 * time.Hour
+
+func (cli *Client) getTcOrCsTokenNode(ctx context.Context, to types.JID) *waBinary.Node {
+	tcToken, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to)
+	if err != nil {
+		cli.Log.Warnf("Failed to get privacy token for %s: %v", to, err)
+	} else if tcToken != nil && time.Since(tcToken.Timestamp) < tcTokenMaxAge {
+		return &waBinary.Node{
+			Tag:     "tctoken",
+			Content: tcToken.Token,
+		}
+	}
+	// Fall back to cstoken if no valid tctoken
+	return cli.genCsTokenNode(ctx, to)
+}
+
+func (cli *Client) genCsTokenNode(ctx context.Context, to types.JID) *waBinary.Node {
+	salt, err := cli.Store.NctSalt.GetNctSalt(ctx)
+	if err != nil {
+		cli.Log.Warnf("Failed to get NctSalt for cstoken: %v", err)
+		return nil
+	} else if len(salt) == 0 {
+		return nil
+	}
+	// Look up the LID for the recipient (cstoken uses HMAC-SHA256(salt, LID))
+	recipientLID, err := cli.Store.LIDs.GetLIDForPN(ctx, to)
+	if err != nil || recipientLID.IsEmpty() {
+		return nil
+	}
+	mac := hmac.New(sha256.New, salt)
+	mac.Write([]byte(recipientLID.String()))
+	csToken := mac.Sum(nil)
+	return &waBinary.Node{
+		Tag:     "cstoken",
+		Content: csToken,
+	}
+}
+
+// defaultTcTokenSenderDuration is the bucket duration for checking if a new sender token needs to be issued.
+// This matches the tctoken_duration_sender AB prop default in WhatsApp Web (30 days).
+const defaultTcTokenSenderDuration = 30 * 24 * time.Hour
+
+// shouldSendPrivacyToken checks if we need to issue a new trusted contact token to a user.
+// Uses the same bucket logic as WAWebTrustedContactsUtils.shouldSendNewToken in WhatsApp Web.
+func shouldSendPrivacyToken(senderTimestamp time.Time) bool {
+	if senderTimestamp.IsZero() {
+		return true
+	}
+	duration := int64(defaultTcTokenSenderDuration.Seconds())
+	nowBucket := time.Now().Unix() / duration
+	tsBucket := senderTimestamp.Unix() / duration
+	return nowBucket > tsBucket
+}
+
+// IssuePrivacyToken sends a trusted contact token IQ to the WhatsApp server for the given user.
+// The server will deliver the token to the recipient so they can include it in messages they send to us.
+// This implements the WAWebSetPrivacyTokensJob.issuePrivacyToken flow from WhatsApp Web.
+func (cli *Client) IssuePrivacyToken(ctx context.Context, to types.JID) error {
+	ts := time.Now().Unix()
+	issueJID := to.ToNonAD()
+	if lid, err := cli.Store.LIDs.GetLIDForPN(ctx, to); err == nil && !lid.IsEmpty() {
+		issueJID = lid.ToNonAD()
+	}
+	_, err := cli.sendIQ(ctx, infoQuery{
+		Namespace: "privacy",
+		Type:      "set",
+		To:        types.ServerJID,
+		Content: []waBinary.Node{{
+			Tag: "tokens",
+			Content: []waBinary.Node{{
+				Tag: "token",
+				Attrs: waBinary.Attrs{
+					"jid":  issueJID,
+					"type": "trusted_contact",
+					"t":    strconv.FormatInt(ts, 10),
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send privacy token IQ: %w", err)
+	}
+	return cli.Store.PrivacyTokens.UpdatePrivacySenderTimestamp(ctx, to, time.Unix(ts, 0))
 }
 
 func getTypeFromMessage(msg *waE2E.Message) string {

@@ -403,6 +403,14 @@ func (cli *Client) dispatchAppState(ctx context.Context, name appstate.WAPatchNa
 			Action:       act,
 			FromFullSync: fullSync,
 		}
+	case appstate.IndexNCTSaltSync:
+		if nctSaltAction := mutation.Action.GetNctSaltSyncAction(); nctSaltAction != nil {
+			if salt := nctSaltAction.GetSalt(); len(salt) > 0 {
+				if storeUpdateError = cli.Store.NctSalt.PutNctSalt(ctx, salt); storeUpdateError == nil {
+					cli.Log.Debugf("Stored NctSalt from app state sync")
+				}
+			}
+		}
 	}
 	if storeUpdateError != nil {
 		cli.Log.Errorf("Failed to update device store after app state mutation: %v", storeUpdateError)

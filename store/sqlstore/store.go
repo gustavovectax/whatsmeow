@@ -934,7 +934,7 @@ const (
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET token=EXCLUDED.token, timestamp=EXCLUDED.timestamp
 	`
 	getPrivacyToken = `
-		SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
+		SELECT token, timestamp, sender_timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
 			CASE
 				WHEN $2 LIKE '%@lid'
 					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
@@ -966,15 +966,58 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 	var token store.PrivacyToken
 	token.User = user.ToNonAD()
 	var ts int64
-	err := s.db.QueryRow(ctx, getPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+	var senderTS *int64
+	err := s.db.QueryRow(ctx, getPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts, &senderTS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	} else {
 		token.Timestamp = time.Unix(ts, 0)
+		if senderTS != nil {
+			token.SenderTimestamp = time.Unix(*senderTS, 0)
+		}
 		return &token, nil
 	}
+}
+
+const (
+	putNctSalt = `
+		INSERT INTO whatsmeow_nct_salt (our_jid, salt)
+		VALUES ($1, $2)
+		ON CONFLICT (our_jid) DO UPDATE SET salt=EXCLUDED.salt
+	`
+	getNctSalt = `SELECT salt FROM whatsmeow_nct_salt WHERE our_jid=$1`
+	updatePrivacySenderTimestamp = `
+		UPDATE whatsmeow_privacy_tokens SET sender_timestamp=$3 WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
+			CASE
+				WHEN $2 LIKE '%@lid'
+					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
+				WHEN $2 LIKE '%@s.whatsapp.net'
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE pn=replace($2, '@s.whatsapp.net', ''))
+				ELSE $2
+			END
+		))
+	`
+)
+
+func (s *SQLStore) PutNctSalt(ctx context.Context, salt []byte) error {
+	_, err := s.db.Exec(ctx, putNctSalt, s.JID, salt)
+	return err
+}
+
+func (s *SQLStore) GetNctSalt(ctx context.Context) ([]byte, error) {
+	var salt []byte
+	err := s.db.QueryRow(ctx, getNctSalt, s.JID).Scan(&salt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return salt, err
+}
+
+func (s *SQLStore) UpdatePrivacySenderTimestamp(ctx context.Context, user types.JID, ts time.Time) error {
+	_, err := s.db.Exec(ctx, updatePrivacySenderTimestamp, s.JID, user.ToNonAD().String(), ts.Unix())
+	return err
 }
 
 const (

@@ -137,14 +137,21 @@ type MsgSecretStore interface {
 }
 
 type PrivacyToken struct {
-	User      types.JID
-	Token     []byte
-	Timestamp time.Time
+	User            types.JID
+	Token           []byte
+	Timestamp       time.Time
+	SenderTimestamp time.Time
 }
 
 type PrivacyTokenStore interface {
 	PutPrivacyTokens(ctx context.Context, tokens ...PrivacyToken) error
 	GetPrivacyToken(ctx context.Context, user types.JID) (*PrivacyToken, error)
+	UpdatePrivacySenderTimestamp(ctx context.Context, user types.JID, ts time.Time) error
+}
+
+type NctSaltStore interface {
+	PutNctSalt(ctx context.Context, salt []byte) error
+	GetNctSalt(ctx context.Context) ([]byte, error)
 }
 
 type BufferedEvent struct {
@@ -193,6 +200,7 @@ type AllSessionSpecificStores interface {
 	ChatSettingsStore
 	MsgSecretStore
 	PrivacyTokenStore
+	NctSaltStore
 	EventBuffer
 }
 
@@ -238,6 +246,7 @@ type Device struct {
 	ChatSettings  ChatSettingsStore
 	MsgSecrets    MsgSecretStore
 	PrivacyTokens PrivacyTokenStore
+	NctSalt       NctSaltStore
 	EventBuffer   EventBuffer
 	LIDs          LIDStore
 	Container     DeviceContainer
@@ -296,6 +305,7 @@ func (device *Device) SetAllStores(store AllSessionSpecificStores) {
 	device.ChatSettings = store
 	device.MsgSecrets = store
 	device.PrivacyTokens = store
+	device.NctSalt = store
 	device.EventBuffer = store
 }
 
