@@ -33,6 +33,7 @@ const (
 	EncSecretEventResponse MsgSecretType = "Event Response"
 	EncSecretEventEdit     MsgSecretType = "Event Edit"
 	EncSecretBotMsg        MsgSecretType = "Bot Message"
+	EncSecretMessageEdit   MsgSecretType = "Message Edit"
 )
 
 func applyBotMessageHKDF(messageSecret []byte) []byte {
@@ -236,10 +237,10 @@ func (cli *Client) DecryptSecretEncryptedMessage(ctx context.Context, evt *event
 	if encMessage == nil {
 		return nil, ErrNotSecretEncryptedMessage
 	}
-	if encMessage.GetSecretEncType() != waE2E.SecretEncryptedMessage_EVENT_EDIT {
+	if encMessage.GetSecretEncType() != waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
 		return nil, fmt.Errorf("unsupported secret enc type: %s", encMessage.SecretEncType.String())
 	}
-	plaintext, err := cli.decryptMsgSecret(ctx, evt, EncSecretEventEdit, encMessage, encMessage.GetTargetMessageKey())
+	plaintext, err := cli.decryptMsgSecret(ctx, evt, EncSecretMessageEdit, encMessage, encMessage.GetTargetMessageKey())
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt message: %w", err)
 	}
